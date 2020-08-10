@@ -635,11 +635,6 @@ def _get_virtualenv_binary_path():
 
 
 @pytest.fixture(scope="session")
-def salt_ssh_sshd_port():
-    return saltfactories.utils.ports.get_unused_localhost_port()
-
-
-@pytest.fixture(scope="session")
 def integration_files_dir(salt_factories):
     """
     Fixture which returns the salt integration files directory path.
@@ -723,7 +718,7 @@ def prod_env_pillar_tree_root_dir(pillar_tree_root_dir):
 
 
 @pytest.fixture(scope="session")
-def salt_syndic_master_factory(request, salt_factories, salt_ssh_sshd_port):
+def salt_syndic_master_factory(request, salt_factories):
     root_dir = salt_factories._get_root_dir_for_daemon("syndic_master")
     conf_dir = root_dir / "conf"
     conf_dir.mkdir(exist_ok=True)
@@ -798,28 +793,6 @@ def salt_syndic_master_factory(request, salt_factories, salt_ssh_sshd_port):
         }
     )
 
-    # We also need a salt-ssh roster config file
-    roster_path = str(conf_dir / "roster")
-    roster_contents = textwrap.dedent(
-        """\
-        localhost:
-          host: 127.0.0.1
-          port: {}
-          user: {}
-          mine_functions:
-            test.arg: ['itworked']
-        """.format(
-            salt_ssh_sshd_port, RUNTIME_VARS.RUNNING_TESTS_USER
-        )
-    )
-    log.debug(
-        "Writing to configuration file %s. Configuration:\n%s",
-        roster_path,
-        roster_contents,
-    )
-    with salt.utils.files.fopen(roster_path, "w") as wfh:
-        wfh.write(roster_contents)
-
     factory = salt_factories.get_salt_master_daemon(
         "syndic_master",
         order_masters=True,
@@ -846,9 +819,7 @@ def salt_syndic_factory(request, salt_factories, salt_syndic_master_factory):
 
 
 @pytest.fixture(scope="session")
-def salt_master_factory(
-    request, salt_factories, salt_syndic_master_factory, salt_ssh_sshd_port
-):
+def salt_master_factory(request, salt_factories, salt_syndic_master_factory):
     root_dir = salt_factories._get_root_dir_for_daemon("master")
     conf_dir = root_dir / "conf"
     conf_dir.mkdir(exist_ok=True)
@@ -944,28 +915,6 @@ def salt_master_factory(
             shutil.copytree(source, dest)
         else:
             shutil.copyfile(source, dest)
-
-    # We also need a salt-ssh roster config file
-    roster_path = str(conf_dir / "roster")
-    roster_contents = textwrap.dedent(
-        """\
-        localhost:
-          host: 127.0.0.1
-          port: {}
-          user: {}
-          mine_functions:
-            test.arg: ['itworked']
-        """.format(
-            salt_ssh_sshd_port, RUNTIME_VARS.RUNNING_TESTS_USER
-        )
-    )
-    log.debug(
-        "Writing to configuration file %s. Configuration:\n%s",
-        roster_path,
-        roster_contents,
-    )
-    with salt.utils.files.fopen(roster_path, "w") as wfh:
-        wfh.write(roster_contents)
 
     factory = salt_syndic_master_factory.get_salt_master_daemon(
         "master", config_defaults=config_defaults, config_overrides=config_overrides,
@@ -1166,8 +1115,9 @@ def sshd_config_dir(salt_factories):
     shutil.rmtree(str(config_dir), ignore_errors=True)
 
 
-@pytest.fixture(scope="session")
-def sshd_server_factory(salt_factories, salt_ssh_sshd_port, sshd_config_dir):
+@pytest.fixture(scope="module")
+def sshd_server(salt_factories, sshd_config_dir, salt_master):
+    salt_ssh_sshd_port = saltfactories.utils.ports.get_unused_localhost_port()
     sshd_config_dict = {
         "Protocol": "2",
         # Turn strict modes off so that we can operate in /tmp
@@ -1198,18 +1148,38 @@ def sshd_server_factory(salt_factories, salt_ssh_sshd_port, sshd_config_dir):
         "Subsystem": "sftp /usr/lib/openssh/sftp-server",
         "UsePAM": "yes",
     }
-    return salt_factories.get_sshd_daemon(
+    factory = salt_factories.get_sshd_daemon(
         "sshd",
         listen_port=salt_ssh_sshd_port,
         sshd_config_dict=sshd_config_dict,
         config_dir=sshd_config_dir,
     )
+    # We also need a salt-ssh roster config file
+    roster_path = pathlib.Path(salt_master.config_dir) / "roster"
+    roster_contents = textwrap.dedent(
+        """\
+        localhost:
+          host: 127.0.0.1
+          port: {}
+          user: {}
+          mine_functions:
+            test.arg: ['itworked']
+        """.format(
+            salt_ssh_sshd_port, RUNTIME_VARS.RUNNING_TESTS_USER
+        )
+    )
+    log.debug(
+        "Writing to configuration file %s. Configuration:\n%s",
+        roster_path,
+        roster_contents,
+    )
+    with salt.utils.files.fopen(str(roster_path), "w") as wfh:
+        wfh.write(roster_contents)
 
-
-@pytest.fixture(scope="module")
-def sshd_server(sshd_server_factory):
-    with sshd_server_factory.started():
-        yield sshd_server_factory
+    with factory.started():
+        yield factory
+    if roster_path.exists():
+        roster_path.unlink()
 
 
 # <---- Salt Factories -----------------------------------------------------------------------------------------------
